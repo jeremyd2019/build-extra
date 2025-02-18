@@ -30,13 +30,14 @@ die () {
 
 mode=
 case "$1" in
-lock|unlock|break_lock|quick_add)
+lock|unlock|break_lock|quick_add|quick_remove)
 	mode="$1"
 	shift
 	;;
 *)
-	die "Usage:\n%s\n%s\n" \
+	die "Usage:\n%s\n%s\n%s\n" \
 		" $0 quick_add <package>..." \
+		" $0 quick_remove <architecture> <package>..." \
 		" $0 ( lock | unlock <id> | break_lock )"
 	;;
 esac
@@ -107,6 +108,15 @@ repo_add () {
 	"$this_script_dir/repo-add" "$@"
 }
 
+repo_remove () {
+	if test ! -s "$this_script_dir/repo-remove"
+	then
+		# Make sure that GPGKEY is used unquoted
+		 sed 's/"\(\${\?GPGKEY}\?\)"/\1/g' </usr/bin/repo-remove >"$this_script_dir/repo-remove"
+	fi &&
+	"$this_script_dir/repo-remove" "$@"
+}
+
 sanitize_db () { # <file>...
 	perl -e '
 		foreach my $path (@ARGV) {
@@ -174,9 +184,20 @@ sanitize_db () { # <file>...
 	fi
 }
 
-quick_add () { # <file>...
-	test $# -gt 0 ||
+quick_action () { # <action> <file>...
+	test $# -gt 1 ||
 	die "Need at least one file"
+
+	action="$1"
+	shift
+	if test "z${action}" = "zremove"
+	then
+		test $# -gt 1 ||
+		die "Need at least one package"
+
+		default_arch="$1"
+		shift
+	fi
 
 	if test -z "$PACMANDRYRUN$azure_blobs_token"
 	then
@@ -212,88 +233,132 @@ quick_add () { # <file>...
 	x86_64_msys=
 	all_files=
 
-	# Copy the file(s) to the temporary directory, and schedule their addition to the appropriate index(es)
-	for path in "$@"
-	do
-		file="${path##*/}"
-		mingw=
-		case "${path##*/}" in
-		mingw-w64-*.pkg.tar.xz|mingw-w64-*.pkg.tar.zst)
-			arch=${file##mingw-w64-}
-			arch=${arch#clang-}
-			arch=${arch%%-*}
-			key=${arch}_mingw
-			;;
-		git-extra-*.pkg.tar.xz|git-extra-*.pkg.tar.zst)
-			arch=${file%.pkg.tar.*}
-			arch=${arch##*-}
-			key=${arch}_mingw
-			;;
-		*-*.pkg.tar.xz|*-*.pkg.tar.zst)
-			arch=${file%.pkg.tar.*}
-			arch=${arch##*-}
-			test any != "$arch" || {
-				arch="$(tar Oxf "$path" .BUILDINFO |
-					sed -n 's/^installed = msys2-runtime-[0-9].*-\(.*\)/\1/p')"
-				test -n "$arch" ||
-				die "Could not determine architecture of '$path'"
-			}
-			key=${arch}_msys
-			;;
-		*.src.tar.gz|*.src.tar.xz|*.src.tar.zst)
-			arch=sources
-			key=
-			;;
-		*.sig)
-			# skip explicit signatures; we copy them automatically
-			continue
-			;;
-		*)
-			echo "Skipping unknown file: $file" >&2
-			continue
-			;;
-		esac
-		test -n "$arch" || die "Could not determine architecture for $path"
-		case " $architectures sources " in
-		*" $arch "*) ;;  # okay
-		*) echo "Skipping file with unknown arch: $file" >&2; continue;;
-		esac
+	if test "z${action}" = "zadd"
+	then
+		# Copy the file(s) to the temporary directory, and schedule their addition to the appropriate index(es)
+		for path in "$@"
+		do
+			file="${path##*/}"
+			mingw=
+			case "${path##*/}" in
+			mingw-w64-*.pkg.tar.xz|mingw-w64-*.pkg.tar.zst)
+				arch=${file##mingw-w64-}
+				arch=${arch#clang-}
+				arch=${arch%%-*}
+				key=${arch}_mingw
+				;;
+			git-extra-*.pkg.tar.xz|git-extra-*.pkg.tar.zst)
+				arch=${file%.pkg.tar.*}
+				arch=${arch##*-}
+				key=${arch}_mingw
+				;;
+			*-*.pkg.tar.xz|*-*.pkg.tar.zst)
+				arch=${file%.pkg.tar.*}
+				arch=${arch##*-}
+				test any != "$arch" || {
+					arch="$(tar Oxf "$path" .BUILDINFO |
+						sed -n 's/^installed = msys2-runtime-[0-9].*-\(.*\)/\1/p')"
+					test -n "$arch" ||
+					die "Could not determine architecture of '$path'"
+				}
+				key=${arch}_msys
+				;;
+			*.src.tar.gz|*.src.tar.xz|*.src.tar.zst)
+				arch=sources
+				key=
+				;;
+			*.sig)
+				# skip explicit signatures; we copy them automatically
+				continue
+				;;
+			*)
+				echo "Skipping unknown file: $file" >&2
+				continue
+				;;
+			esac
+			test -n "$arch" || die "Could not determine architecture for $path"
+			case " $architectures sources " in
+			*" $arch "*) ;;  # okay
+			*) echo "Skipping file with unknown arch: $file" >&2; continue;;
+			esac
 
-		echo "Copying $file to $arch/..." >&2
-		test -z "$key" || eval "$key=\$$key\\ $file"
-		all_files="$all_files $arch/$file"
+			echo "Copying $file to $arch/..." >&2
+			test -z "$key" || eval "$key=\$$key\\ $file"
+			all_files="$all_files $arch/$file"
 
-		if test ! -d "$dir/$arch"
-		then
-			git -C "$dir" rev-parse --quiet --verify refs/remotes/origin/$arch >/dev/null ||
-			git -C "$dir" fetch --depth=1 origin x86_64 aarch64 i686 ||
-			die "$dir: could not fetch from pacman-repo"
+			if test ! -d "$dir/$arch"
+			then
+				git -C "$dir" rev-parse --quiet --verify refs/remotes/origin/$arch >/dev/null ||
+				git -C "$dir" fetch --depth=1 origin x86_64 aarch64 i686 ||
+				die "$dir: could not fetch from pacman-repo"
 
-			git -C "$dir" worktree add -b $arch $arch origin/$arch ||
-			die "Could not initialize $dir/$arch"
-		fi
+				git -C "$dir" worktree add -b $arch $arch origin/$arch ||
+				die "Could not initialize $dir/$arch"
+			fi
 
-		cp "$path" "$dir/$arch" ||
-		die "Could not copy $path to $dir/$arch"
+			cp "$path" "$dir/$arch" ||
+			die "Could not copy $path to $dir/$arch"
 
-		if test -f "$path".sig
-		then
-			cp "$path".sig "$dir/$arch/" ||
-			die "Could not copy $path.sig to $dir/$arch"
-                        all_files="$all_files $arch/$file.sig"
-		elif test -n "$GPGKEY"
-		then
-			echo "Signing $arch/$file..." >&2
-			call_gpg --detach-sign --no-armor -u $GPGKEY "$dir/$arch/$file"
-			all_files="$all_files $arch/$file.sig"
-		fi
-	done
+			if test -f "$path".sig
+			then
+				cp "$path".sig "$dir/$arch/" ||
+				die "Could not copy $path.sig to $dir/$arch"
+	                        all_files="$all_files $arch/$file.sig"
+			elif test -n "$GPGKEY"
+			then
+				echo "Signing $arch/$file..." >&2
+				call_gpg --detach-sign --no-armor -u $GPGKEY "$dir/$arch/$file"
+				all_files="$all_files $arch/$file.sig"
+			fi
+		done
+	elif test "z${action}" = "zremove"
+	then
+		for pkgname in "$@"
+		do
+			mingw=
+			case "${pkgname}" in
+			mingw-w64-*)
+				arch=${pkgname##mingw-w64-}
+				arch=${arch#clang-}
+				arch=${arch%%-*}
+				key=${arch}_mingw
+				;;
+			git-extra)
+				arch=$default_arch
+				key=${arch}_mingw
+				;;
+			*)
+				arch=$default_arch
+				key=${arch}_msys
+				;;
+			esac
+			test -n "$arch" || die "Could not determine architecture for $pkgname"
+			case " $architectures sources " in
+			*" $arch "*) ;;  # okay
+			*) echo "Skipping package with unknown arch: $pkgname" >&2; continue;;
+			esac
+
+			test -z "$key" || eval "$key=\$$key\\ $pkgname"
+
+			if test ! -d "$dir/$arch"
+			then
+				git -C "$dir" rev-parse --quiet --verify refs/remotes/origin/$arch >/dev/null ||
+				git -C "$dir" fetch --depth=1 origin x86_64 aarch64 i686 ||
+				die "$dir: could not fetch from pacman-repo"
+
+				git -C "$dir" worktree add -b $arch $arch origin/$arch ||
+				die "Could not initialize $dir/$arch"
+			fi
+		done
+	else
+		die "Unknown action '$action'"
+	fi
 
 	# Acquire lease
 	PACMAN_DB_LEASE="$(lock)" ||
 	die 'Could not obtain a lock for uploading'
 
-	# Verify that the package databases are synchronized and add files
+	# Verify that the package databases are synchronized and add or remove files
 	sign_option=
 	test -z "$GPGKEY" || sign_option=--sign
 	dbs=
@@ -356,7 +421,12 @@ quick_add () { # <file>...
 		 die "The package databases in $arch differ between Azure Blobs and pacman-repo"
 
 		 # Now add the files to the Pacman database
-		 repo_add $sign_option git-for-windows-$arch.db.tar.xz $msys $mingw &&
+		 if test "z${action}" = "zadd"
+		 then
+			 repo_add $sign_option git-for-windows-$arch.db.tar.xz $msys $mingw
+		 else
+			 repo_remove $sign_options git-for-windows-$arch.db.tar.xz $msys $mingw
+		 fi &&
 		 { test ! -h git-for-windows-$arch.db || rm git-for-windows-$arch.db; } &&
 		 cp git-for-windows-$arch.db.tar.xz git-for-windows-$arch.db && {
 			test -z "$sign_option" || {
@@ -366,7 +436,12 @@ quick_add () { # <file>...
 		 } &&
 		 if test -n "$db2"
 		 then
-			repo_add $sign_option git-for-windows-$db2.db.tar.xz $mingw &&
+			if test "z${action}" = "zadd"
+			then
+				repo_add $sign_option git-for-windows-$db2.db.tar.xz $mingw
+			else
+				repo_remove $sign_option git-for-windows-$db2.db.tar.xz $mingw
+			fi &&
 			{ test ! -h git-for-windows-$db2.db || rm git-for-windows-$db2.db; } &&
 			cp git-for-windows-$db2.db.tar.xz git-for-windows-$db2.db && {
 				test -z "$sign_option" || {
@@ -376,20 +451,31 @@ quick_add () { # <file>...
 			}
 		 fi &&
 
-		 # Remove previous versions from the Git branch
-		 printf '%s\n' $msys $mingw |
-		 sed 's/-[^-]*-[^-]*-[^-]*\.pkg\.tar\.\(xz\|zst\)$/-[0-9]*/' |
-		 xargs git rm --sparse --cached -- ||
-		 die "Could not remove previous versions from the Git branch in $arch"
+		 if test "z${action}" = "zadd"
+		 then
+			 # Remove previous versions from the Git branch
+			 printf '%s\n' $msys $mingw |
+			 sed 's/-[^-]*-[^-]*-[^-]*\.pkg\.tar\.\(xz\|zst\)$/-[0-9]*/' |
+			 xargs git rm --sparse --cached -- ||
+			 die "Could not remove previous versions from the Git branch in $arch"
 
-		 # Now add the files to the Git branch
-		 git add --sparse $msys $mingw \*.sig ':(exclude)*.old.sig' &&
-		 msg="$(printf 'Update %s package(s)\n\n%s\n' \
-			$(printf '%s\n' $msys $mingw | wc -l) \
-			"$(printf '%s\n' $msys $mingw |
-			  sed 's/^\(.*\)-\([^-]*-[^-]*\)-[^-]*\.pkg\.tar\.\(xz\|zst\)$/\1 -> \2/')")" &&
+			 # Now add the files to the Git branch
+			 git add --sparse $msys $mingw \*.sig ':(exclude)*.old.sig' &&
+			 msg="$(printf 'Update %s package(s)\n\n%s\n' \
+				$(printf '%s\n' $msys $mingw | wc -l) \
+				"$(printf '%s\n' $msys $mingw |
+				  sed 's/^\(.*\)-\([^-]*-[^-]*\)-[^-]*\.pkg\.tar\.\(xz\|zst\)$/\1 -> \2/')")"
+		 else
+			 # Remove package files from the Git branch
+			 printf '%s-[0-9]*\n' $msys $mingw |
+			 xargs git rm --sparse --cached -- ||
+			 die "Could not remove previous versions from the Git branch in $arch"
+			 msg="$(printf 'Remove %s package(s)\n\n%s\n' \
+				$(printf '%s\n' $msys $mingw | wc -l) \
+				"$(printf '%s\n' $msys $mingw)")"
+		 fi &&
 		 git commit -asm "$msg") ||
-		die "Could not add $msys $mingw to db in $arch"
+		die "Could not ${action} $msys $mingw to/from db in $arch"
 	done
 
 	test -n "$to_push" || die "No packages to push?!"
@@ -427,11 +513,19 @@ quick_add () { # <file>...
 
 					 eval "msys=\$${arch}_msys" &&
 					 eval "mingw=\$${arch}_mingw" &&
-					 printf '%s\n' $msys $mingw |
-					 sed 's/-[^-]*-[^-]*-[^-]*\.pkg\.tar\.\(xz\|zst\)$/-[0-9]*/' |
-					 xargs -r git restore --ignore-skip-worktree-bits -- &&
+					 if test "z${action}" = "zadd"
+					 then
+						 printf '%s\n' $msys $mingw |
+						 sed 's/-[^-]*-[^-]*-[^-]*\.pkg\.tar\.\(xz\|zst\)$/-[0-9]*/' |
+						 xargs -r git restore --ignore-skip-worktree-bits -- &&
 
-					 repo_add $sign_option git-for-windows-$arch.db.tar.xz $msys $mingw &&
+						 repo_add $sign_option git-for-windows-$arch.db.tar.xz $msys $mingw
+					 else
+						 printf '%s-[0-9]*\n' $msys $mingw |
+						 xargs -r git restore --ignore-skip-worktree-bits -- &&
+
+						 repo_remove $sign_option git-for-windows-$arch.db.tar.xz $msys $mingw
+					 fi &&
 					 { test ! -h git-for-windows-$arch.db || rm git-for-windows-$arch.db; } &&
 					 cp git-for-windows-$arch.db.tar.xz git-for-windows-$arch.db && {
 						test -z "$sign_option" || {
@@ -441,7 +535,12 @@ quick_add () { # <file>...
 					 } &&
 					 if test -n "$db2"
 					 then
-						repo_add $sign_option git-for-windows-$db2.db.tar.xz $mingw &&
+						if test "z${action}" = "zadd"
+						then
+							repo_add $sign_option git-for-windows-$db2.db.tar.xz $mingw
+						else
+							repo_remove $sign_option git-for-windows-$db2.db.tar.xz $mingw
+						fi &&
 						{ test ! -h git-for-windows-$db2.db || rm git-for-windows-$db2.db; } &&
 						cp git-for-windows-$db2.db.tar.xz git-for-windows-$db2.db && {
 							test -z "$sign_option" || {
@@ -549,6 +648,14 @@ quick_add () { # <file>...
 	# Remove the temporary directory
 	rm -r "$dir" ||
 	die "Could not remove $dir/"
+}
+
+quick_add () {
+	quick_action add "$@"
+}
+
+quick_remove () {
+	quick_action remove "$@"
 }
 
 lock () { #
