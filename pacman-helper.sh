@@ -282,7 +282,7 @@ quick_action () { # <action> <file>...
 			file=${file%-[0-9]*}
 			key=${arch}_msys
 			;;
-		mingw-w64-i686*|mingw-w64-x86_64-*|mingw-w64-clang-aarch64-*)
+		mingw-w64-i686-*|mingw-w64-x86_64-*|mingw-w64-clang-aarch64-*)
 			test remove = "$label" || die "Cannot add $path"
 			arch=${file#mingw-w64-}
 			arch=${arch#clang-}
